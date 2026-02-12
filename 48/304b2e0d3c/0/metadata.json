@@ -1,0 +1,38 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "48304b2e0d3c",
+  "session_id": "0929f616-70fa-4c45-a0f9-02d932d95aa3",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-12T18:58:06.21169Z",
+  "branch": "feature/insights",
+  "checkpoints_count": 7,
+  "files_touched": [
+    ".claude/state/handoff-20260210-151835.md",
+    ".claude/state/handoff-20260210-151859.md",
+    ".claude/state/handoff-20260210-152402.md",
+    ".claude/state/handoff-20260210-164439.md",
+    ".claude/state/handoff-20260210-164742.md",
+    ".claude/state/handoff-20260210-164959.md",
+    ".claude/state/handoff-20260210-165308.md",
+    ".git/hooks/commit-msg",
+    ".git/hooks/pre-push"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 902,
+    "cache_creation_tokens": 120314,
+    "cache_read_tokens": 4107387,
+    "output_tokens": 10915,
+    "api_call_count": 65
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-12T18:58:05.813929Z",
+    "agent_lines": 0,
+    "human_added": 6500,
+    "human_modified": 135,
+    "human_removed": 0,
+    "total_committed": 6635,
+    "agent_percentage": 0
+  },
+  "transcript_path": ".claude/projects/-Users-Sunny-2025prjs-entireio-cli/0929f616-70fa-4c45-a0f9-02d932d95aa3.jsonl"
+}

@@ -1,0 +1,34 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "48304b2e0d3c",
+  "strategy": "manual-commit",
+  "branch": "feature/insights",
+  "checkpoints_count": 7,
+  "files_touched": [
+    ".claude/state/handoff-20260210-151835.md",
+    ".claude/state/handoff-20260210-151859.md",
+    ".claude/state/handoff-20260210-152402.md",
+    ".claude/state/handoff-20260210-164439.md",
+    ".claude/state/handoff-20260210-164742.md",
+    ".claude/state/handoff-20260210-164959.md",
+    ".claude/state/handoff-20260210-165308.md",
+    ".git/hooks/commit-msg",
+    ".git/hooks/pre-push"
+  ],
+  "sessions": [
+    {
+      "metadata": "/48/304b2e0d3c/0/metadata.json",
+      "transcript": "/48/304b2e0d3c/0/full.jsonl",
+      "context": "/48/304b2e0d3c/0/context.md",
+      "content_hash": "/48/304b2e0d3c/0/content_hash.txt",
+      "prompt": "/48/304b2e0d3c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 902,
+    "cache_creation_tokens": 120314,
+    "cache_read_tokens": 4107387,
+    "output_tokens": 10915,
+    "api_call_count": 65
+  }
+}
