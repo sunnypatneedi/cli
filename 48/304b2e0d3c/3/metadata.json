@@ -1,9 +1,11 @@
 {
   "cli_version": "dev",
   "checkpoint_id": "48304b2e0d3c",
+  "session_id": "3b9f4959-12a1-46a8-b20f-03395dc4ebd7",
   "strategy": "manual-commit",
+  "created_at": "2026-02-12T18:58:57.6428Z",
   "branch": "feature/insights",
-  "checkpoints_count": 17,
+  "checkpoints_count": 2,
   "files_touched": [
     ".claude/state/handoff-20260210-142403.md",
     ".claude/state/handoff-20260210-145903.md",
@@ -30,9 +32,6 @@
     ".claude/state/handoff-20260211-125502.md",
     ".claude/state/handoff-20260212-091837.md",
     ".claude/state/handoff-20260212-105855.md",
-    ".git/hooks/commit-msg",
-    ".git/hooks/pre-push",
-    "INSIGHTS_IMPLEMENTATION.md",
     "TEST_GUIDE.md",
     "cmd/entire/cli/.claude/state/handoff-20260210-183044.md",
     "cmd/entire/cli/.claude/state/handoff-20260211-105559.md",
@@ -47,52 +46,24 @@
     "cmd/entire/cli/explain_formatters.go",
     "cmd/entire/cli/explain_formatters_test.go",
     "cmd/entire/cli/explain_test.go",
-    "cmd/entire/cli/insights.go",
-    "cmd/entire/cli/insights_analytics.go",
-    "cmd/entire/cli/insights_cache.go",
-    "cmd/entire/cli/insights_filters.go",
-    "cmd/entire/cli/insights_formatters.go",
-    "cmd/entire/cli/insights_test.go",
-    "cmd/entire/cli/integration_test/insights_test.go",
-    "cmd/entire/cli/root.go",
-    "redact/showcase_test.go",
     "run-checks.sh"
   ],
-  "sessions": [
-    {
-      "metadata": "/48/304b2e0d3c/0/metadata.json",
-      "transcript": "/48/304b2e0d3c/0/full.jsonl",
-      "context": "/48/304b2e0d3c/0/context.md",
-      "content_hash": "/48/304b2e0d3c/0/content_hash.txt",
-      "prompt": "/48/304b2e0d3c/0/prompt.txt"
-    },
-    {
-      "metadata": "/48/304b2e0d3c/1/metadata.json",
-      "transcript": "/48/304b2e0d3c/1/full.jsonl",
-      "context": "/48/304b2e0d3c/1/context.md",
-      "content_hash": "/48/304b2e0d3c/1/content_hash.txt",
-      "prompt": "/48/304b2e0d3c/1/prompt.txt"
-    },
-    {
-      "metadata": "/48/304b2e0d3c/2/metadata.json",
-      "transcript": "/48/304b2e0d3c/2/full.jsonl",
-      "context": "/48/304b2e0d3c/2/context.md",
-      "content_hash": "/48/304b2e0d3c/2/content_hash.txt",
-      "prompt": "/48/304b2e0d3c/2/prompt.txt"
-    },
-    {
-      "metadata": "/48/304b2e0d3c/3/metadata.json",
-      "transcript": "/48/304b2e0d3c/3/full.jsonl",
-      "context": "/48/304b2e0d3c/3/context.md",
-      "content_hash": "/48/304b2e0d3c/3/content_hash.txt",
-      "prompt": "/48/304b2e0d3c/3/prompt.txt"
-    }
-  ],
+  "agent": "Claude Code",
   "token_usage": {
-    "input_tokens": 2868,
-    "cache_creation_tokens": 1189720,
-    "cache_read_tokens": 27275036,
-    "output_tokens": 29484,
-    "api_call_count": 307
-  }
+    "input_tokens": 934,
+    "cache_creation_tokens": 267893,
+    "cache_read_tokens": 12541825,
+    "output_tokens": 9234,
+    "api_call_count": 116
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-12T18:58:57.069999Z",
+    "agent_lines": 0,
+    "human_added": 24,
+    "human_modified": 613,
+    "human_removed": 0,
+    "total_committed": 602,
+    "agent_percentage": 0
+  },
+  "transcript_path": ".claude/projects/-Users-Sunny-2025prjs-entireio-cli/3b9f4959-12a1-46a8-b20f-03395dc4ebd7.jsonl"
 }
