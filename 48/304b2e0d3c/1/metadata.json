@@ -1,0 +1,41 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "48304b2e0d3c",
+  "session_id": "623f36e8-6b47-4c6d-88e4-03375dedf7f8",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-12T18:58:06.785862Z",
+  "branch": "feature/insights",
+  "checkpoints_count": 4,
+  "files_touched": [
+    ".claude/state/handoff-20260210-174727.md",
+    ".claude/state/handoff-20260210-175303.md",
+    "cmd/entire/cli/.claude/state/handoff-20260210-183044.md",
+    "cmd/entire/cli/.claude/state/handoff-20260211-105559.md",
+    "cmd/entire/cli/explain.go",
+    "cmd/entire/cli/explain_formatters_test.go",
+    "cmd/entire/cli/explain_test.go",
+    "cmd/entire/cli/insights.go",
+    "cmd/entire/cli/insights_analytics.go",
+    "cmd/entire/cli/insights_formatters.go",
+    "cmd/entire/cli/insights_test.go",
+    "redact/showcase_test.go"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 592,
+    "cache_creation_tokens": 278392,
+    "cache_read_tokens": 4769412,
+    "output_tokens": 1282,
+    "api_call_count": 73
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-12T18:58:06.61651Z",
+    "agent_lines": 1807,
+    "human_added": 2316,
+    "human_modified": 254,
+    "human_removed": 0,
+    "total_committed": 4377,
+    "agent_percentage": 41.28398446424492
+  },
+  "transcript_path": ".claude/projects/-Users-Sunny-2025prjs-entireio-cli/623f36e8-6b47-4c6d-88e4-03375dedf7f8.jsonl"
+}

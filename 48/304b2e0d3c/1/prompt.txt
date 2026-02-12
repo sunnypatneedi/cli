@@ -1,0 +1,27 @@
+It looks like your shell is trying to run mise before it knows where the command lives. Since line 309 of your .zshrc is failing, you likely need to ensure the mise binary is in your $PATH or properly initialized. 
+Here is how to fix it:
+Ensure mise is installed: If you haven't installed it yet, use the official installation script or a package manager like Homebrew: brew install mise.
+Add the shim path: If you installed via a method that doesn't auto-add to your path, add export PATH="$HOME/.local/share/mise/bin:$PATH" to the top of your .zshrc.
+Correct the initialization: Your .zshrc should contain the following line to activate mise:
+eval "$(mise activate zsh)"
+Check for typos: Ensure that "mise" isn't being called before its path is defined in the script. The shell executes .zshrc line-by-line; if you try to use a tool managed by mise (like node or python) before eval "$(mise activate zsh)", it will fail. 
+For more detailed troubleshooting, you can check the mise documentation or the mise GitHub repository.
+
+---
+
+Help with a mise configuration issue in your shell setup
+
+---
+
+now # Download Go modules
+go mod download
+
+# Build the CLI
+mise run build
+
+# Verify setup by running tests
+mise run test
+
+---
+
+commit to what repo?
