@@ -1,0 +1,1163 @@
+Implement the following plan:
+
+# Implementation Plan: `entire insights` Command
+
+## Context
+
+The `entire insights` command provides session analytics across time periods, helping developers understand their AI-assisted development patterns. Users want to see:
+- How much time they spend with AI agents
+- Token usage and estimated costs
+- Which tools they use most frequently
+- Activity patterns (daily trends, peak hours)
+- Top repositories and recent sessions
+
+This addresses the need for **visibility and accountability** in AI-assisted development - understanding ROI, budgeting for API costs, and identifying usage patterns.
+
+## Implementation Approach
+
+### Architecture (Enhanced with Claude Code Insights Patterns)
+
+**Three-tier analytics architecture:**
+1. **Session filtering (quality gate)**: Exclude noise (agent sub-sessions, <2 messages, <1 minute duration)
+2. **Metadata-rich (fast)**: Aggregate from session state and checkpoint metadata (no transcript parsing)
+3. **Content-rich (slower)**: Parse transcripts in parallel to extract tool usage and hourly patterns
+
+**Insights from Claude Code's implementation:**
+- **Facet-based caching**: Cache per-session analysis, only process new sessions on subsequent runs
+- **Bounded parallelism**: Process up to 50 new sessions per run (prevent resource exhaustion)
+- **Incremental analysis**: Aggregate new session stats with cached historical data
+- **Recent work weighting**: Weight recent sessions more heavily in patterns/recommendations
+- **Chunking strategy**: For transcripts >30K chars, chunk into 25K segments before analysis
+- **Privacy-first**: Local storage only, HTML reports stay on disk until user shares
+
+**v1 approach (this implementation):**
+- Pure aggregation (deterministic, fast, no LLM calls)
+- Local caching in `.entire/insights-cache/` for incremental updates
+- Export formats: Terminal (default), JSON, Markdown, HTML (future)
+
+**v2 consideration (future):**
+- Optional LLM-powered analysis (`--analyze` flag) for qualitative insights
+- Pattern recognition: goal categories, friction points, success patterns
+- Actionable recommendations: skill suggestions, workflow improvements
+
+**Code reuse strategy:**
+- Follow patterns from `explain.go` (flag handling, checkpoint loading, formatters)
+- Reuse `strategy.ListSessions()` and `checkpoint.GitStore` abstractions
+- Use existing `transcript.ParseFromBytes()` for JSONL streaming
+- Leverage parallel processing with goroutines (worker pool pattern)
+- Add session filtering (quality gate before aggregation)
+- Implement incremental caching (facet-based, per-session)
+
+### Key Data Structures
+
+**InsightsQuery** - Filtering criteria:
+- Period (week/month/year), time range (start/end)
+- Optional repo filter, optional agent filter
+
+**InsightsReport** - Aggregated results:
+- Totals: sessions, time, tokens, cost, files, commits
+- Agent breakdown: sessions/tokens per agent
+- Activity: daily/weekly/monthly session counts and hours
+- Top-K: repos by hours (K=5), tools by count (K=5)
+- Recent sessions: last 5 with descriptions
+- Peak hours: 24-hour heatmap (0-23)
+
+### Files to Create
+
+**`cmd/entire/cli/insights.go`** (250 lines)
+- Command definition with flags: --period, --repo, --agent, --json, --export, --format, --output, --no-cache
+- Flag validation (mutually exclusive, required combinations)
+- Session filtering (exclude <2 messages, <1 min duration, agent sub-tasks)
+- Cache management: load cached facets, identify new sessions, save updated cache
+- Routing to compute → format → output pipeline
+- Integration with `checkDisabledGuard()`
+
+**`cmd/entire/cli/insights_analytics.go`** (450 lines)
+- `filterSessions()`: Quality gate (exclude <2 messages, <1 min, sub-tasks)
+- `computeMetadataMetrics()`: Fast path using session/checkpoint metadata
+- `enrichWithTranscriptData()`: Parallel transcript parsing with worker pool (max 50 sessions/run)
+- `extractToolUsage()`: Parse JSONL, count tool_use blocks
+- `extractHourlyActivity()`: Parse timestamps, bucket by hour
+- `chunkTranscript()`: Split transcripts >30K chars into 25K segments
+- `weightRecentSessions()`: Apply recency weighting to activity metrics
+- Data types: InsightsQuery, InsightsReport, SessionFacet (for caching), AgentStat, ActivityPoint, etc.
+
+**`cmd/entire/cli/insights_formatters.go`** (300 lines)
+- `formatInsightsTerminal()`: Human-readable output with tables and alignment
+- `formatInsightsJSON()`: Structured JSON export
+- `formatInsightsMarkdown()`: Documentation-ready Markdown
+- `formatInsightsHTML()`: Interactive HTML report (inspired by Claude Code's report.html)
+- Helper formatters: `formatDuration()`, `formatNumber()` (thousands separators)
+- Visualization helpers: `renderActivityChart()`, `renderHeatmap()`
+
+**`cmd/entire/cli/insights_filters.go`** (150 lines)
+- `applyPeriodFilter()`: Convert week/month/year to time ranges
+- `filterSessionsByTime()`: Time window filtering
+- `filterSessionsByAgent()`: Agent type filtering
+- `extractRepoName()`: Parse git remote for repository name
+
+**`cmd/entire/cli/insights_cache.go`** (200 lines) - NEW
+- `SessionFacet`: Cached per-session analytics (tokens, tools, duration, messages)
+- `InsightsCache`: Persistent cache in `.entire/insights-cache/<repo-hash>.json`
+- `loadCache()`: Read cached facets from disk
+- `saveCache()`: Persist updated facets
+- `identifyNewSessions()`: Diff current sessions vs cached sessions
+- Cache invalidation: timestamp-based (30 day TTL) or `--no-cache` flag
+
+**`cmd/entire/cli/insights_test.go`** (200 lines)
+- Unit tests for analytics computation
+- Filter logic tests (period, agent)
+- Formatter tests (snapshot-based)
+- Uses `t.Parallel()` pattern throughout
+
+**`cmd/entire/cli/integration_test/insights_test.go`** (150 lines)
+- End-to-end command execution tests
+- Export format validation (JSON structure, Markdown format)
+- Multi-session aggregation tests
+- Uses `RunForAllStrategies()` pattern
+
+### Critical Implementation Details
+
+**Session discovery with quality filtering:**
+```go
+sessions, err := strategy.ListSessions()  // Returns []Session sorted by StartTime
+
+// Quality gate: exclude noise (inspired by Claude Code)
+sessions = filterQuality(sessions, store)  // Remove <2 messages, <1 min, sub-tasks
+
+filtered := filterSessionsByTime(sessions, query.StartTime, query.EndTime)
+if query.AgentFilter != "" {
+    filtered = filterSessionsByAgent(filtered, store, query.AgentFilter)
+}
+```
+
+**Quality filtering logic:**
+```go
+func filterQuality(sessions []Session, store *checkpoint.GitStore) []Session {
+    var quality []Session
+    for _, s := range sessions {
+        // Load first checkpoint to check message count
+        content, _ := store.ReadLatestSessionContent(ctx, s.Checkpoints[0].CheckpointID)
+
+        // Count user messages
+        lines, _ := transcript.ParseFromBytes(content.Transcript)
+        userMessages := 0
+        for _, line := range lines {
+            if line.Type == transcript.TypeUser {
+                userMessages++
+            }
+        }
+
+        // Filter criteria (from Claude Code patterns)
+        duration := s.EndTime.Sub(s.StartTime)
+        if userMessages >= 2 && duration >= 1*time.Minute {
+            quality = append(quality, s)
+        }
+    }
+    return quality
+}
+```
+
+**Incremental caching (new pattern):**
+```go
+// Load existing cache
+cache, _ := loadCache(repoName)
+
+// Identify new sessions
+allSessions, _ := strategy.ListSessions()
+newSessions := identifyNewSessions(allSessions, cache.Facets)
+
+// Process only new sessions (bounded to 50)
+if len(newSessions) > 50 {
+    newSessions = newSessions[:50]  // Most recent 50
+}
+
+// Extract facets from new sessions
+newFacets := make(map[string]SessionFacet)
+for _, s := range newSessions {
+    facet := extractFacet(s, store)  // Tokens, tools, duration, messages
+    newFacets[s.SessionID] = facet
+}
+
+// Merge with cached facets
+cache.Facets = mergeFacets(cache.Facets, newFacets)
+saveCache(repoName, cache)
+
+// Aggregate across all facets (cached + new)
+report := aggregateFacets(cache.Facets, query)
+```
+
+**Metadata aggregation (fast path):**
+```go
+for _, session := range sessions {
+    for _, cp := range session.Checkpoints {
+        summary, _ := store.ReadCommitted(ctx, cp.CheckpointID)
+        report.TotalTokens += summary.TokenUsage.Total()
+        report.FilesModified += len(summary.FilesTouched)
+    }
+}
+```
+
+**Transcript parsing (parallel, bounded, with chunking):**
+```go
+numWorkers := runtime.NumCPU() / 2  // Limit concurrency
+semaphore := make(chan struct{}, numWorkers)
+var wg sync.WaitGroup
+
+// Bounded parallelism: max 50 sessions per run (Claude Code pattern)
+sessions = sessions
+if len(sessions) > 50 {
+    sessions = sessions[:50]
+}
+
+for _, session := range sessions {
+    wg.Add(1)
+    go func(s Session) {
+        defer wg.Done()
+        semaphore <- struct{}{}
+        defer func() { <-semaphore }()
+
+        content, _ := store.ReadLatestSessionContent(ctx, s.Checkpoints[0].CheckpointID)
+
+        // Chunk large transcripts (>30K chars) into 25K segments
+        transcript := content.Transcript
+        if len(transcript) > 30000 {
+            transcript = chunkTranscript(transcript, 25000)[0]  // Use first chunk for analysis
+        }
+
+        toolCounts, _ := extractToolUsage(transcript)
+        // Aggregate results
+    }(session)
+}
+wg.Wait()
+```
+
+**Tool usage extraction:**
+```go
+lines, _ := transcript.ParseFromBytes(transcriptBytes)
+toolCounts := make(map[string]int)
+
+for _, line := range lines {
+    if line.Type != transcript.TypeAssistant {
+        continue
+    }
+    var msg transcript.AssistantMessage
+    json.Unmarshal(line.Message, &msg)
+
+    for _, block := range msg.Content {
+        if block.Type == transcript.ContentTypeToolUse {
+            toolCounts[block.Name]++
+        }
+    }
+}
+```
+
+### Integration with Existing Code
+
+**Command registration** (in `root.go`):
+```go
+cmd.AddCommand(newInsightsCmd())
+```
+
+**Reused functions:**
+- `checkDisabledGuard(cmd.OutOrStdout())` - Check if Entire is enabled
+- `strategy.ListSessions()` - Session discovery
+- `checkpoint.NewGitStore(repo)` - Create checkpoint store
+- `store.ReadCommitted(ctx, id)` - Load checkpoint metadata
+- `store.ReadLatestSessionContent(ctx, id)` - Load session transcript
+- `transcript.ParseFromBytes(content)` - Stream JSONL parsing
+- `agent.AgentType` - Agent type constants
+
+**Patterns from explain.go:**
+- Flag validation with early returns
+- Mutually exclusive flags: `cmd.MarkFlagsMutuallyExclusive("json", "export")`
+- File output: `os.WriteFile(outputFile, data, 0o644)`
+- Error handling: `NewSilentError()` when custom message printed
+
+### Implementation Phases
+
+**Phase 1: Core Infrastructure + Quality Filtering** (3 hours)
+- Create command skeleton with flags (including --no-cache)
+- Implement data types (InsightsQuery, InsightsReport, SessionFacet)
+- Add session quality filtering (<2 messages, <1 min excluded)
+- Add metadata-only metrics (no transcript parsing yet)
+- Basic terminal formatter
+- Test: `entire insights` shows filtered session counts
+
+**Phase 2: Caching + Incremental Analysis** (2 hours)
+- Implement `insights_cache.go` (SessionFacet, load/save)
+- Add incremental analysis (only process new sessions)
+- Bounded parallelism (max 50 sessions per run)
+- Test: Second run of `entire insights` is faster (uses cache)
+
+**Phase 3: Filtering** (1 hour)
+- Period filtering (week/month/year)
+- Agent filtering
+- Test: `entire insights --period month --agent claude-code`
+
+**Phase 4: Content-Rich Metrics** (2 hours)
+- Tool usage extraction from transcripts
+- Parallel processing with goroutine pool (bounded to 50 sessions)
+- Transcript chunking for large sessions (>30K chars → 25K chunks)
+- Hourly activity bucketing
+- Recent work weighting (exponential decay)
+- Test: Tool usage and peak hours appear, large transcripts handled
+
+**Phase 5: Export Formats** (2-3 hours)
+- JSON formatter
+- Markdown formatter
+- HTML formatter (interactive, inspired by Claude Code's report.html)
+- File output (-o flag)
+- Test: `entire insights --export --format json -o stats.json`
+- Test: `entire insights --export --format html -o report.html`
+
+**Phase 6: Polish** (1-2 hours)
+- Terminal output formatting (alignment, separators)
+- Duration/number formatters
+- Cost estimation (tokens × $15/1M, model-aware)
+- Recency weighting visualization ("Recent work weighted more heavily")
+- Error messages (friendly, actionable)
+- Cache stats in output ("Analyzed 5 new sessions, 120 cached")
+
+**Phase 7: Testing & Quality** (2-3 hours)
+- Unit tests for analytics functions (including cache logic) - use `t.Parallel()`
+- Integration tests (end-to-end, cache invalidation) - use `RunForAllStrategies()`
+- Performance tests (verify <1s week, <5s year with caching)
+- Edge case tests (no sessions, cache corruption, large transcripts)
+- Format code: `mise run fmt`
+- Lint check: `mise run lint`
+- Duplication check: `mise run dup`
+- Full CI suite: `mise run test:ci`
+
+### Performance Expectations
+
+**Without caching (first run):**
+- **Week (14 sessions)**: <1s (mostly metadata, quality filtering)
+- **Month (60 sessions)**: 2-3s (parallel transcript parsing, bounded to 50)
+- **Year (412 sessions)**: 8-10s (max 50 sessions parsed per run, rest aggregated from historical data)
+
+**With caching (subsequent runs):**
+- **Week (14 sessions, 5 new)**: <500ms (5 new sessions parsed, rest from cache)
+- **Month (60 sessions, 10 new)**: 1-2s (10 new sessions, 50 cached)
+- **Year (412 sessions, 20 new)**: 3-5s (20 new sessions, 392 cached)
+
+**Cache benefits (from Claude Code insights):**
+- First run: Full analysis of all sessions
+- Subsequent runs: Only analyze new sessions since last run
+- Cache hit ratio: Typically 90%+ for daily/weekly usage
+- Cache size: ~1KB per session facet (lightweight)
+
+### Verification Steps
+
+After implementation:
+
+1. **Basic functionality:**
+   ```bash
+   entire insights                     # Default week view
+   entire insights --period month      # Month view
+   entire insights --period year       # Year view
+   ```
+
+2. **Filtering:**
+   ```bash
+   entire insights --agent claude-code  # Filter by agent
+   entire insights --repo puddle-app    # Filter by repo (future)
+   ```
+
+3. **Export formats:**
+   ```bash
+   entire insights --json               # JSON to stdout
+   entire insights --export --format json -o report.json
+   entire insights --export --format markdown -o INSIGHTS.md
+   entire insights --export --format html -o report.html  # Interactive HTML
+   ```
+
+3b. **Caching:**
+   ```bash
+   entire insights                      # Uses cache (fast)
+   entire insights --no-cache           # Force full re-analysis
+   rm -rf .entire/insights-cache        # Clear cache manually
+   ```
+
+4. **Before every commit (REQUIRED - from CONTRIBUTING.md):**
+   ```bash
+   mise run fmt       # Format code (CI enforces gofmt)
+   mise run lint      # Lint check (CI enforces golangci-lint)
+   mise run test:ci   # Run all tests (unit + integration)
+   ```
+
+5. **Code quality checks:**
+   ```bash
+   mise run dup           # Check for duplication (threshold 50)
+   mise run dup:staged    # Check only staged files
+   ```
+
+6. **Validate output structure:**
+   - Terminal: Check alignment, formatting, thousands separators
+   - JSON: Validate structure with `jq`
+   - Markdown: Preview rendered output
+   - HTML: Open in browser, check interactive elements
+
+7. **CONTRIBUTING.md compliance checklist:**
+   - ✅ Pass linting: `mise run lint`
+   - ✅ Pass tests: `mise run test:ci`
+   - ✅ Add tests: Unit tests in `insights_test.go`, integration tests in `integration_test/insights_test.go`
+   - ✅ Use `t.Parallel()` in all tests (unless process-global state modified)
+   - ✅ No code duplication: `mise run dup` passes
+   - ✅ Follow Go code style: Error handling, gofmt, meaningful names
+   - ✅ Checkpoint trailers: Entire adds automatically on commit
+
+### Edge Cases to Handle
+
+1. **No sessions found**: Show friendly message, don't error
+2. **Missing transcripts**: Skip gracefully, compute from available data
+3. **Multi-session checkpoints**: Use CheckpointSummary.SessionIDs to expand correctly
+4. **Empty time range**: Validate start < end, show clear error
+5. **Invalid agent name**: List valid agents in error message
+6. **Concurrent sessions**: Sessions can overlap - count by start time, not ranges
+7. **Cache corruption**: Detect malformed JSON, rebuild cache gracefully
+8. **Cache invalidation**: TTL-based (30 days) or --no-cache flag
+9. **Large transcripts**: Chunk >30K chars into 25K segments, analyze first chunk
+10. **Filtered out sessions**: Show count ("10 sessions filtered out: 5 too short, 5 sub-tasks")
+11. **Bounded parallelism overflow**: If >50 new sessions, show message ("Analyzing 50 most recent of 120 new sessions")
+
+### Critical Files
+
+- `/Users/Sunny/2025prjs/entireio/cli/cmd/entire/cli/explain.go` - Command pattern reference
+- `/Users/Sunny/2025prjs/entireio/cli/cmd/entire/cli/explain_formatters.go` - Formatter patterns
+- `/Users/Sunny/2025prjs/entireio/cli/cmd/entire/cli/strategy/session.go` - Session data structures
+- `/Users/Sunny/2025prjs/entireio/cli/cmd/entire/cli/transcript/parse.go` - JSONL streaming parser
+- `/Users/Sunny/2025prjs/entireio/cli/cmd/entire/cli/checkpoint/checkpoint.go` - Checkpoint types
+
+### Success Criteria
+
+**Baseline features (from UI mockup):**
+- ✅ Shows all metrics (sessions, time, tokens, cost, agents, top repos, tools, peak hours)
+- ✅ Period filtering works (week/month/year)
+- ✅ Agent filtering works (claude-code, gemini-cli)
+- ✅ Export formats validated (JSON, Markdown, HTML)
+
+**Claude Code insights patterns:**
+- ✅ Session quality filtering (<2 messages, <1 min excluded)
+- ✅ Incremental caching (facet-based, per-session)
+- ✅ Bounded parallelism (max 50 sessions per run)
+- ✅ Transcript chunking (>30K chars → 25K segments)
+- ✅ Recent work weighting (recent sessions weighted more)
+- ✅ Cache stats displayed ("5 new, 120 cached")
+
+**Performance:**
+- ✅ First run: <1s week, <10s year
+- ✅ Cached runs: <500ms week, <5s year
+- ✅ Cache hit ratio: >90% for daily/weekly usage
+
+**Quality (CONTRIBUTING.md requirements):**
+- ✅ All tests pass: `mise run test:ci`
+- ✅ Code formatted: `mise run fmt`
+- ✅ Linting passes: `mise run lint`
+- ✅ No code duplication: `mise run dup` (threshold 50)
+- ✅ Tests use `t.Parallel()` pattern
+- ✅ Follows existing codebase patterns (from CLAUDE.md)
+- ✅ Privacy-first (local cache, no forced sharing)
+- ✅ Error handling: All errors handled explicitly
+- ✅ Go conventions: Meaningful names, proper formatting
+
+
+If you need specific details from before exiting plan mode (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/Sunny/.REDACTED.jsonl
+
+---
+
+Make sure the design follows this guide: Light theme, white background, very minimal color
+Stat cards with large monospace numbers + tiny unit labels
+Scatter/bubble contribution chart (not heatmaps), hour-of-day on Y-axis, date on X-axis, amber/orange dots
+"Claude Code" as a coral/orange badge
+GitHub-like checkpoint table with diff stats (+green / -red)
+Almost zero borders, lots of whitespace
+Left sidebar navigation (Overview, Repositories)
+Greeting header ("Evening, sunnypatneedi")
+
+---
+
+did we follow and complete this before we submit this PR? context: # Contributing to the Entire CLI
+
+Thank you for your interest in contributing to Entire! We welcome contributions from everyone.
+
+Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
+
+> **New to Entire?** See the [README](README.md) for setup and usage documentation.
+
+---
+
+## First-Time Contributors
+
+New to the project? Welcome! Here's how to get started:
+
+### Good First Issues
+
+We recommend starting with:
+- **Documentation improvements** - Fix typos, clarify explanations, add examples
+- **Test contributions** - Add test cases, improve coverage
+- **Small bug fixes** - Issues labeled `good-first-issue`
+
+---
+
+## Submitting Issues
+
+All feature requests, bug reports, and general issues should be submitted through [GitHub Issues](https://github.com/entireio/cli/issues). Please search for existing issues before opening a new one.
+
+For security-related issues, see the Security section below.
+
+---
+
+## Security
+
+If you discover a security vulnerability, **do not report it through GitHub Issues**. Instead, please follow the instructions in our [SECURITY.md](SECURITY.md) file for responsible disclosure. All security reports are kept confidential as described in SECURITY.md.
+
+---
+
+## Contributions & Communication
+
+Contributions and communications are expected to occur through:
+
+- [GitHub Issues](https://github.com/entireio/cli/issues) - Bug reports and feature requests
+- [GitHub Discussions](https://github.com/entireio/cli/discussions) - Questions and general conversation
+- [Discord](https://discord.gg/4WXDu2Ph) - Real-time chat and support
+
+Please represent the project and community respectfully in all public and private interactions.
+
+
+## How to Contribute
+
+
+There are many ways to contribute:
+
+- **Feature requests** - Open a [GitHub Issue](https://github.com/entireio/cli/issues) to discuss your idea
+- **Bug reports** - Report issues via [GitHub Issues](https://github.com/entireio/cli/issues) (see [Reporting Bugs](#reporting-bugs))
+- **Code contributions** - Fix bugs, add features, improve tests
+- **Documentation** - Improve guides, fix typos, add examples
+- **Community** - Help others, answer questions, share knowledge
+
+
+## Reporting Bugs
+
+Good bug reports help us fix issues quickly. When reporting a bug, please include:
+
+### Required Information
+
+1. **Entire CLI version** - run `entire version`
+2. **Operating system**
+3. **Go version** - run `go version`
+
+### What to Include
+
+Please answer these questions in your bug report:
+
+1. **What did you do?** - Include the exact commands you ran
+2. **What did you expect to happen?**
+3. **What actually happened?** - Include the full error message or unexpected output
+4. **Can you reproduce it?** - Does it happen every time or intermittently?
+5. **Any additional context?** - Logs, screenshots, or related issues
+
+---
+
+## Local Setup
+
+### Prerequisites
+
+- **Go 1.25.x** - Check with `go version`
+- **mise** - Task runner and version manager. Install with `curl https://mise.run | sh`
+
+### Clone and Install
+
+```bash
+# Clone the repository
+git clone https://github.com/entireio/cli.git
+cd cli
+
+# Install dependencies (mise will install the correct Go version)
+mise install
+
+# Download Go modules
+go mod download
+
+# Build the CLI
+mise run build
+
+# Verify setup by running tests
+mise run test
+```
+
+> See [CLAUDE.md](CLAUDE.md) for detailed architecture and development reference.
+
+---
+
+## Making Changes
+
+1. **Create a branch** for your changes:
+   ```bash
+   git checkout -b feature/your-feature-name
+   ```
+
+2. **Make your changes** - follow the [Code Style](#code-style) guidelines
+
+3. **Test your changes** - see [Testing](#testing)
+
+4. **Commit** with clear, descriptive messages:
+   ```bash
+   git commit -m "Add feature: description of what you added"
+   ```
+
+---
+
+## Code Style
+
+Follow standard Go idioms and conventions. For detailed guidance, see the **Go Code Style** section in [CLAUDE.md](CLAUDE.md).
+
+### Key Points
+
+- **Error handling**: Handle all errors explicitly - don't leave them unchecked
+- **Formatting**: Code must pass `gofmt` (run `mise run fmt`)
+- **Linting**: Code must pass `golangci-lint` (run `mise run lint`)
+- **Naming**: Use meaningful, descriptive names following Go conventions
+
+---
+
+## Testing
+
+> See [CLAUDE.md](CLAUDE.md) for complete testing documentation.
+
+```bash
+# Unit tests - always run before committing
+mise run test
+
+# Integration tests
+mise run test:integration
+
+# Full CI suite
+mise run test:ci
+```
+
+Integration tests use the `//go:build integration` build tag and are located in `cmd/entire/cli/integration_test/`.
+
+---
+
+## Creating an Agent
+
+
+Entire supports two ways to create agents:
+
+### 1. Claude Code Agent Personas (Markdown)
+
+These are markdown files that define specialized behaviors for Claude Code (e.g., developer, reviewer, etc.).
+
+- **Location:** `.claude/agents/`
+- **Structure:**
+   ```markdown
+   ---
+   name: my-agent
+   description: What this agent does
+   model: opus
+   color: blue
+   ---
+
+   # Agent Name
+   You are a **[Role]** with expertise in [domain].
+
+   ## Core Principles
+   - Principle 1
+   - Principle 2
+
+   ## Process
+   1. Step 1
+   2. Step 2
+
+   ## Output Format
+   How to structure responses...
+   ```
+- **To invoke:** Create a matching command in `.claude/commands/` that spawns the agent via the Task tool.
+- **Examples:**
+   - `.claude/agents/dev.md` - TDD Developer
+   - `.claude/agents/reviewer.md` - Code Reviewer
+
+### 2. Coding Agent Integrations (Go)
+
+These are Go implementations that integrate Entire with different AI coding tools (Claude, Cursor, Aider, etc.) using the Agent abstraction layer.
+
+- **Location:** `cmd/entire/cli/agent/`
+- **Steps:**
+   1. Implement the `Agent` interface in `agent/agent.go`
+   2. Register your agent in the agent registry
+   3. Add setup and hook configuration as needed
+   4. Ensure session and checkpoint tracking is handled per the abstraction
+- **Reference:** See [CLAUDE.md](CLAUDE.md) for architecture and code examples.
+
+---
+
+**Which should I use?**
+
+- Use a persona markdown agent if you want to create a new role or workflow for Claude Code.
+- Use a coding agent integration if you want to add support for a new AI coding tool or extend agent capabilities in the CLI.
+
+---
+
+## Submitting a Pull Request
+
+### Prerequisites
+
+1. **Install and enable Entire** - Install the latest version of the Entire CLI (see [installation docs](https://docs.entire.io/cli/installation)), verify with `entire version`, then run `entire enable` in the repository
+2. **Pass linting** - Run `mise run lint` (includes golangci-lint, gofmt, gomod, shellcheck)
+3. **Pass tests** - Run `mise run test` to verify your changes
+4. **Add tests** - Include tests for new Go code and functionality
+5. **Include checkpoint trailers** - All commits must have Entire checkpoint trailers from your sessions
+
+### Submitting
+
+1. **Push** your branch to your fork
+2. **Open a PR** against the `main` branch
+3. **Fill out** the PR template with:
+   - Clear description of changes
+   - Related issue numbers
+   - Testing done
+4. **Wait for review** - maintainers will provide feedback
+
+---
+
+## Troubleshooting
+
+### Common Setup Issues
+
+**`go mod download` fails with timeout**
+```bash
+# Try using direct mode
+GOPROXY=direct go mod download
+```
+
+**`mise install` fails**
+```bash
+# Ensure mise is properly installed
+curl https://mise.run | sh
+
+# Reload your shell
+source ~/.zshrc  # or ~/.bashrc
+```
+
+**Binary not updating after rebuild**
+```bash
+# Check which binary is being used
+which entire
+type -a entire
+
+# You may have multiple installations - update the correct path
+```
+
+---
+
+## Community
+
+Join the Entire community:
+
+- **Discord** - [Join our server][discord] for discussions and support
+- **GitHub Discussions** - [Join the conversation][discussions]
+
+[discord]: https://discord.gg/4WXDu2Ph
+[discussions]: https://github.com/entireio/cli/discussions
+
+---
+
+## Additional Resources
+
+- [README](README.md) - Setup and usage documentation
+- [CLAUDE.md](CLAUDE.md) - Architecture and development reference
+- [Code of Conduct](CODE_OF_CONDUCT.md) - Community guidelines
+- [Security Policy](SECURITY.md) - Reporting security vulnerabilities
+
+---
+
+Thank you for contributing!
+
+---
+
+do them for me
+
+---
+
+run /cognitive-modes and /rigorous-thinking to consider if the new insights feature overlaps with existing features for Entire?
+
+---
+
+Base directory for this skill: /Users/Sunny/.claude/skills/cognitive-modes
+
+# Cognitive Mode-Switch Words
+
+Words that don't describe what you want — they rewire **how** you approach the problem.
+
+## Quick Reference: Word → Behavior
+
+When the user uses these words, activate the corresponding thinking mode:
+
+### Depth & Rigor
+
+| Word | Thinking Mode | Invoke Skill |
+|------|---------------|--------------|
+| **Rigorous** | Proof-like thinking — every step must earn its place | `rigorous-thinking` |
+| **First-principles** | Derive from ground truth, strip borrowed reasoning | `rigorous-thinking` |
+| **Mechanistic** | Demand causal chains: "A causes B because..." | `rigorous-thinking` |
+| **Axiomatic** | Each claim follows logically from stated premises | `rigorous-thinking` |
+| **Falsifiable** | Flip to "what would prove this wrong?" | `rigorous-thinking` |
+| **Steelman** | Construct strongest possible version of opposing view | `rigorous-thinking`, `rigorous-exchange` |
+| **Non-trivial** | Skip basics, assume expertise, go deeper | — |
+| **Exhaustive** | Complete coverage, no blind spots, breadth before depth | — |
+| **Necessary and sufficient** | Exact boundaries — no more, no less | `claim-validator` |
+| **Load-bearing** | Identify the single assumption everything depends on | `rigorous-thinking` |
+| **Dispositive** | Find the one fact that settles the debate | `rigorous-thinking` |
+| **Ultra think hard** | Maximum cognitive effort, no shortcuts anywhere | `rigorous-thinking` |
+
+### Creative Reframing
+
+| Word | Thinking Mode | Invoke Skill |
+|------|---------------|--------------|
+| **Reimagine** | Break fixed mental models — clean-slate vision | `ideacritic` |
+| **Orthogonal** | Think perpendicular to the current frame | `ideacritic` |
+| **Contrarian** | Deliberate inversion of the popular view | `ideacritic` |
+| **Subversive** | Question the premise itself, not just disagree | `ideacritic` |
+| **Invert** | Instead of "how to succeed," ask "how to guarantee failure" | `inversion-analysis` |
+| **Counterfactual** | "What would have happened if X didn't occur?" | `inversion-analysis` |
+| **Zero-based** | Start from scratch — if you had none of this, what would you build? | `ideacritic` |
+| **Provocative** | Bold, non-consensus ideas you'd never say in a meeting | `ideacritic` |
+| **Transmute** | Convert a weakness into a strength | `ideacritic` |
+| **Reframe** | Re-examine whether you're solving the right problem | `ideacritic` |
+| **Degenerate case** | Push variables to 0, 1, or infinity to reveal hidden structure | — |
+| **Adjacent possible** | Constrain creativity to what's buildable from current position | — |
+
+### Precision & Mathematical
+
+| Word | Thinking Mode | Invoke Skill |
+|------|---------------|--------------|
+| **Probabilities/Distribution** | Full statistical reasoning — likelihoods, not certainties | `claim-validator` |
+| **Bounded** | Force upper and lower limits on any assertion | `claim-validator`, `unit-economics-validator` |
+| **Monotonic** | Does this always increase/decrease, or are there reversals? | — |
+| **Asymptotic** | What happens as scale approaches infinity? | — |
+| **Invariant** | Identify the constant in a sea of variables | — |
+| **Order of magnitude** | Calibration without false precision | `unit-economics-validator` |
+| **Sensitivity analysis** | Which variable, if wrong by 2x, breaks the conclusion? | `unit-economics-validator` |
+| **Convex** | Is the payoff shape concave (diminishing) or convex (accelerating)? | — |
+| **Marginal** | What does one more unit buy you? Not average, incremental. | `pricing-strategy` |
+| **Dimensionality** | How many independent axes actually matter? | — |
+| **Closed-form** | Demand a computable formula, not hand-waving | — |
+
+### Tradeoff & Decision
+
+| Word | Thinking Mode | Invoke Skill |
+|------|---------------|--------------|
+| **Sacrifice** | Name what you're willing to lose — make tradeoffs explicit | `operator-playbook` |
+| **Irreversible** | Can we undo this or not? One-way vs two-way doors | `operator-playbook` |
+| **Binding constraint** | Identify the single bottleneck | `systems-decompose` |
+| **Pareto** | What 20% of effort gets 80% of the result? | `operator-playbook` |
+| **Second-order effects** | What happens *after* the thing happens? Ripple effects. | `systems-review` |
+| **Opportunity cost** | Is this better than the next best alternative? | `operator-playbook` |
+| **Regret minimization** | Which choice do you regret least looking back from 10 years out? | `operator-playbook` |
+| **Non-negotiable** | What will you absolutely not bend on? | — |
+| **Asymmetric** | Where upside and downside are mismatched | — |
+| **Reversibility gradient** | Not binary — place decision on the spectrum | — |
+
+### Quality & Craft
+
+| Word | Thinking Mode | Invoke Skill |
+|------|---------------|--------------|
+| **Elegant** | Simplicity, completeness, and surprise in one solution | `code-review`, `software-architecture` |
+| **Idiomatic** | Domain-native solutions, not generic ones | `code-review` |
+| **Canonical** | The accepted best practice, not improvisation | `code-review` |
+| **Production-grade** | Error handling, edge cases, monitoring, logging | `code-review`, `security-review` |
+| **Battle-tested** | Proven approaches over clever theory | `software-architecture` |
+| **Minimalist** | Remove everything that isn't essential | `simplify` |
+| **Composable** | Modular design where pieces can be mixed and matched | `software-architecture` |
+| **Tasteful** | Aesthetic reasoning — what *feels* right to an expert? | — |
+| **Crisp** | Precision in language — every word must earn its place | `deslop` |
+
+### Systems Thinking
+
+| Word | Thinking Mode | Invoke Skill |
+|------|---------------|--------------|
+| **Emergent** | What arises from interactions that no individual part possesses? | `systems-decompose` |
+| **Cascading** | Maps domino effects through a system | `systems-review` |
+| **Equilibrium** | Is this equilibrium stable or unstable? What disrupts it? | — |
+| **Phase transition** | At what threshold does the system fundamentally shift? | — |
+| **Feedback loop** | Is this positive (amplifying) or negative (stabilizing)? | `systems-decompose` |
+| **Attractor** | Where does this naturally converge? | — |
+| **Entropy** | What's degrading over time? What maintenance prevents collapse? | `techdebt` |
+
+### Epistemic Calibration
+
+| Word | Thinking Mode | Invoke Skill |
+|------|---------------|--------------|
+| **Bayesian** | Explicit priors, evidence weighting, posterior updates | `rigorous-thinking` |
+| **Calibrated** | Honest probability assignment to claims | `rigorous-thinking` |
+| **Crux** | Single disagreement that, if settled, resolves everything | `rigorous-exchange` |
+| **Pre-mortem** | Assume this failed. Now explain why. | `inversion-analysis` |
+| **Evidence-weighted** | Which signals carry the most weight and why? | `rigorous-thinking` |
+| **Adversarial** | Assume someone is actively trying to break this | `security-review` |
+| **Sparse** | Strip away everything except what carries information | `rigorous-thinking` |
+| **Steel-thread** | Thinnest possible end-to-end proof of concept | — |
+| **Epistemic humility** | Honest "here's what I don't know" disclosure | `rigorous-thinking` |
+| **Signal-to-noise** | What fraction of this information changes decisions? | `rigorous-thinking` |
+
+---
+
+## Power Combos
+
+The highest-leverage technique: **pair a depth word with a constraint word.**
+
+| Combo | Effect | Invoke |
+|-------|--------|--------|
+| **Rigorous + Elegant** | Airtight reasoning that's also beautiful and simple | `rigorous-thinking` + `code-review` |
+| **Reimagine + First-principles** | Clean-slate vision built from ground truth | `ideacritic` + `rigorous-thinking` |
+| **Ultra think hard + Sacrifice** | Maximum depth applied to what must be cut | `rigorous-thinking` + `operator-playbook` |
+| **Falsifiable + Bounded** | Testable claims with defined ranges | `rigorous-thinking` + `claim-validator` |
+| **Adversarial + Exhaustive** | Complete threat surface mapping | `security-review` |
+| **Contrarian + Evidence-weighted** | Bold takes backed by real data | `ideacritic` + `rigorous-thinking` |
+| **Invert + Pre-mortem** | Failure-first scenario planning | `inversion-analysis` |
+| **Sparse + Dispositive** | Cut to the one thing that decides everything | `rigorous-thinking` |
+| **Distribution + Sensitivity analysis** | Full outcome range with fragility mapping | `unit-economics-validator` |
+
+---
+
+## Usage
+
+This skill auto-invokes when the user uses trigger words. It then:
+
+1. **Activates the thinking mode** corresponding to the word(s)
+2. **Invokes relevant skills** if deeper analysis is needed
+3. **Applies the cognitive constraint** to all reasoning in the response
+
+### Examples
+
+**User:** "Be rigorous: why won't this architecture scale?"
+→ Invoke `rigorous-thinking`, apply proof-like reasoning
+
+**User:** "Give me the contrarian take on our pricing."
+→ Invoke `ideacritic`, deliberately invert the popular view
+
+**User:** "Ultra think hard + sacrifice: what do we cut?"
+→ Maximum cognitive effort applied to naming tradeoffs
+
+**User:** "Sensitivity analysis on our unit economics."
+→ Invoke `unit-economics-validator`, identify fragile assumptions
+
+---
+
+## The Meta-Pattern
+
+Words that constrain the **solution space** in a non-obvious way always outperform words that merely describe desired **quality**.
+
+- ❌ "Good" is useless
+- ✅ "Elegant" rewires the entire approach
+- ✅ "Falsifiable" flips from prove-right to prove-wrong
+- ✅ "Sparse" strips away noise before answering
+
+**When you hear a trigger word, change HOW you think, not just WHAT you output.**
+
+
+ARGUMENTS: analyze if the new insights feature overlaps with existing Entire CLI features
+
+---
+
+Base directory for this skill: /Users/Sunny/.claude/skills/rigorous-thinking
+
+# Rigorous Thinking Protocol
+
+A methodology for dismantling conventional wisdom and arriving at robust conclusions through evidence people already have in front of them.
+
+## Cognitive Mode Triggers
+
+When the user uses these words, activate corresponding thinking modes:
+
+| Trigger Word | Thinking Mode |
+|--------------|---------------|
+| **Rigorous** | Proof-like thinking — every step must earn its place |
+| **First-principles** | Derive from ground truth, strip borrowed reasoning |
+| **Mechanistic** | Demand causal chains: "A causes B because..." |
+| **Axiomatic** | Each claim follows logically from stated premises |
+| **Falsifiable** | Flip to "what would prove this wrong?" |
+| **Steelman** | Construct strongest possible version of opposing view |
+| **Non-trivial** | Skip basics, assume expertise, go deeper |
+| **Exhaustive** | Complete coverage, no blind spots, breadth before depth |
+| **Necessary and sufficient** | Exact boundaries — no more, no less |
+| **Load-bearing** | Identify the single assumption everything depends on |
+| **Dispositive** | Find the one fact that settles the debate |
+| **Ultra think hard** | Maximum cognitive effort, no shortcuts anywhere |
+
+## Core Principle
+
+**Not theoretical arguments, just: look at what actually happens.**
+
+The goal is not to win arguments but to force examination of held beliefs against observable reality. Conclusions become robust when they survive genuine attempts at falsification.
+
+---
+
+## The Protocol
+
+### Phase 1: Construct Strongest Counterarguments
+
+Before accepting any thesis, generate the strongest possible objections:
+
+1. **Steelman, don't strawman** - Make each counterargument as strong as an intelligent defender would make it
+2. **Aim for 5-8 genuine objections** - If you only find 2-3, you haven't thought hard enough
+3. **Include objections you don't believe** - Your job is to test the thesis, not defend it
+4. **Name the specific mechanism** - "This might fail because X causes Y" not "this seems risky"
+
+**Quality check:** Would an intelligent critic say "yes, that's exactly my concern"?
+
+---
+
+### Phase 2: Point to Evidence Already Available
+
+For each counterargument, identify observable evidence that tests it:
+
+**The key question: "What would we expect to see if this objection were true?"**
+
+Evidence types (in order of strength):
+1. **Natural experiments** - Identical situations with one variable changed (e.g., twin studies)
+2. **Base rate data** - What actually happens across many instances (not cherry-picked examples)
+3. **Revealed preferences** - What people do vs. what they say
+4. **Time-delayed outcomes** - What happens when constraints are removed
+5. **Multi-child/multi-instance observation** - Variance within controlled conditions
+
+**Bad evidence:**
+- Anecdotes that confirm the desired conclusion
+- Expert opinions without falsifiable predictions
+- Theoretical models without empirical validation
+- Outlier examples (Tiger Woods, Serena Williams) without base rate context
+
+---
+
+### Phase 3: Close Escape Hatches
+
+When an objection seems to survive, probe deeper:
+
+**Causal direction questions:**
+- "Does A cause B, or does B cause A, or does C cause both?"
+- "What would happen if we intervened on A directly?"
+
+**Selection bias questions:**
+- "Who is missing from this sample?"
+- "Why are we only seeing the survivors?"
+
+**Counterfactual questions:**
+- "If this factor mattered, what else would we expect to see?"
+- "What's the control group?"
+
+**Base rate questions:**
+- "For every success case, how many failures used the same approach?"
+- "What percentage of the population does this apply to?"
+
+---
+
+### Phase 4: Track What Collapses vs. What Stands
+
+After each round of evidence examination, update explicitly:
+
+**Collapses completely:**
+- [Objection] - doesn't hold because [specific evidence]
+
+**Weakened but uncertain:**
+- [Objection] - less confident because [evidence], but still possible if [condition]
+
+**Still stands:**
+- [Objection] - evidence is [ambiguous/lacking/supports the objection]
+
+**Don't rush to collapse objections.** The goal is genuine updating, not capitulation or stubbornness.
+
+---
+
+### Phase 5: Identify Asymmetries
+
+Most robust insights reveal asymmetric relationships:
+
+**Common asymmetries:**
+- **Upside/downside asymmetry:** Easy to destroy, hard to create
+- **Necessary vs. sufficient:** Required but not enough
+- **Individual-specific bands:** What varies by person/context vs. what's universal
+- **Threshold effects:** Below X nothing works, above X diminishing returns
+
+**Questions to surface asymmetry:**
+- "Can A create B, or can A only prevent not-B?"
+- "Does the same intervention have different effects on different people?"
+- "What's the shape of the relationship? Linear? Threshold? Diminishing?"
+
+---
+
+### Phase 6: Epistemic Calibration
+
+Apply Bayesian updating and honest confidence:
+
+**Calibration questions:**
+- "How confident am I, actually? 60%? 90%? Be precise."
+- "What's my prior? What evidence would update it?"
+- "What's the crux — the single disagreement that, if resolved, settles this?"
+
+**Signal-to-noise filtering:**
+- "What fraction of this information actually changes the conclusion?"
+- "Which 3 data points actually matter? (sparse)"
+- "What's dispositive — the one fact that decides everything?"
+
+**Pre-mortem mode:**
+- "Assume this failed. Why did it fail?"
+- "What's the most likely cause of death?"
+
+---
+
+### Phase 7: Prevent Premature Agreement
+
+**If the user/interlocutor agrees too quickly, push back:**
+
+- "Don't try to please me. Think hard about what I've said."
+- "It's okay to disagree still. Be rigorous."
+- "What objections do you still have?"
+
+**If you (Claude) agree too quickly, pause:**
+
+- "Let me think through this more rigorously..."
+- "I agreed quickly, but let me steelman the opposing view..."
+- "What am I still missing?"
+
+The conclusion is only robust if it survives genuine pushback from both sides.
+
+---
+
+## Application Checklist
+
+Before finalizing any significant conclusion:
+
+- [ ] Did I generate 5+ strong counterarguments?
+- [ ] Did I point to observable evidence (not just theory)?
+- [ ] Did I check causal direction?
+- [ ] Did I consider base rates?
+- [ ] Did I look for selection bias?
+- [ ] Did I identify what collapsed vs. what stands?
+- [ ] Did I find the underlying asymmetry?
+- [ ] Did I apply epistemic calibration (confidence levels)?
+- [ ] Did I identify the crux/dispositive factor?
+- [ ] Did I resist premature agreement?
+
+---
+
+## Key Phrases
+
+Use these to maintain rigor:
+
+- "What's the evidence people already have in front of them?"
+- "Not theoretical arguments, just: look at what actually happens."
+- "What would we expect to see if this were true?"
+- "For every success case, how many failures used the same approach?"
+- "Does A cause B, or does the child's nature cause both?"
+- "Don't try to please me. Think hard."
+- "What objections still stand after examining the evidence?"
+- "What's the load-bearing assumption here?"
+- "What single fact would be dispositive?"
+- "How calibrated am I? What's my actual confidence?"
+
+
+ARGUMENTS: Analyze if the new `entire insights` command overlaps with existing Entire CLI features. Compare with: `entire explain`, `entire status`, and any other commands that show session/checkpoint information. Identify: (1) functional overlaps, (2) distinct value propositions, (3) potential confusion points, (4) whether insights should be merged into an existing command or remain separate.
+
+---
+
+run the tests
